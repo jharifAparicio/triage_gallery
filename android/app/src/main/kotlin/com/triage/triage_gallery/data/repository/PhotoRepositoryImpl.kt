@@ -7,6 +7,7 @@ import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
 import androidx.annotation.RequiresApi
+import androidx.core.net.toUri
 import com.triage.triage_gallery.data.local.db.dao.TriageDao
 import com.triage.triage_gallery.data.local.db.entities.PhotoEntity
 import com.triage.triage_gallery.data.local.db.entities.PhotoCategoryEntity
@@ -59,57 +60,70 @@ class PhotoRepositoryImpl(
     override suspend fun deletePhoto(photo: Photo) {
         withContext(Dispatchers.IO) {
             try {
-                // 1. VERIFICAR SI TENEMOS SUPERPERMISOS (Android 11+)
-                val isFileManager = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                    Environment.isExternalStorageManager()
+                // 1. Obtener la URI de contenido válida
+                val uriToDelete = if (photo.uri.startsWith("/")) {
+                    getMediaUriFromPath(photo.uri)
                 } else {
-                    false
+                    // android.net.Uri.parse(photo.uri) -> sintaxis antigua y sucia
+                    photo.uri.toUri() // -> sintaxis mas limpia y funciona igual
                 }
 
-                if (isFileManager) {
-                    // MODO DIOS: Borrado directo sin preguntas
-                    // Al tener MANAGE_EXTERNAL_STORAGE, File.delete() funciona incluso en Android 11+
-                    val file = File(photo.uri)
-                    if (file.exists()) {
-                        file.delete()
-                    }
+                if (uriToDelete != null) {
+                    // VERIFICAMOS VERSIÓN DE ANDROID
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                        // ANDROID 11+ (API 30+): USAR PAPELERA (TRASH)
+                        // Intentamos marcar como "basura" en lugar de borrar el archivo.
 
-                    // Intentamos limpiar la referencia en MediaStore para que no quede el fantasma
-                    // (Aunque el archivo ya se borró físicamente)
-                    try {
-                        val uriToDelete = getMediaUriFromPath(photo.uri)
-                        if (uriToDelete != null) {
-                            context.contentResolver.delete(uriToDelete, null, null)
-                        }
-                    } catch (e: Exception) {
-                        // Ignoramos errores aquí, el archivo físico ya murió
-                    }
-
-                } else {
-                    // MODO NORMAL: Usamos MediaStore (Papelera o Diálogo de Permisos)
-                    val uriToDelete = if (photo.uri.startsWith("/")) {
-                        getMediaUriFromPath(photo.uri)
-                    } else {
-                        android.net.Uri.parse(photo.uri)
-                    }
-
-                    if (uriToDelete != null) {
-                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                        try {
                             val updatedValues = ContentValues().apply {
                                 put(MediaStore.MediaColumns.IS_TRASHED, 1)
                             }
                             context.contentResolver.update(uriToDelete, updatedValues, null, null)
-                        } else {
-                            context.contentResolver.delete(uriToDelete, null, null)
+
+                        } catch (securityEx: SecurityException) {
+                            // SI FALLA LA PAPELERA (Aun con permisos), intentamos PLAN B
+                            // Esto pasa si no somos dueños del archivo y el sistema insiste en pedir permiso.
+
+                            // Corrección: Doble verificación para satisfacer al compilador (API Check)
+                            val isFileManager = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                                Environment.isExternalStorageManager()
+                            } else {
+                                false
+                            }
+
+                            if (isFileManager) {
+                                // Si tenemos superpermisos y falló la papelera,
+                                // forzamos borrado directo para que no se queje (pero se pierde la papelera).
+                                // OJO: Si prefieres que SIEMPRE vaya a papelera aunque pida permiso,
+                                // entonces deberíamos lanzar la excepción aquí.
+
+                                // Estrategia Híbrida:
+                                // Intentamos borrar vía File API que con superpermisos no falla.
+                                // (Advertencia: Esto salta la papelera, pero cumple la orden de eliminar sin dialogos).
+                                val file = File(photo.uri)
+                                if (file.exists()) file.delete()
+                            } else {
+                                // Si no tenemos superpermisos, lanzamos el error para que salga el diálogo
+                                throw securityEx
+                            }
                         }
+
+                    } else {
+                        // ANDROID 10 O MENOS: BORRADO DIRECTO
+                        // (No existía papelera unificada confiable)
+                        context.contentResolver.delete(uriToDelete, null, null)
                     }
+                } else {
+                    // Fallback si no encontramos la URI
+                    val file = File(photo.uri)
+                    if (file.exists()) file.delete()
                 }
 
-                // Finalmente, borrar de nuestra DB local
+                // Borrar de nuestra base de datos local
                 dao.deletePhotoById(photo.id)
 
             } catch (e: SecurityException) {
-                // Si aún así falla (ej. no diste el permiso de Manager), relanzamos para pedir permiso normal
+                // Si es RecoverableSecurityException, la UI lo atrapará y mostrará el diálogo
                 throw e
             } catch (e: Exception) {
                 e.printStackTrace()
@@ -119,7 +133,6 @@ class PhotoRepositoryImpl(
 
     // --- FUNCIÓN AUXILIAR CRÍTICA ---
     // Busca en la base de datos de Android el ID correspondiente a una ruta de archivo
-    @RequiresApi(Build.VERSION_CODES.JELLY_BEAN)
     private fun getMediaUriFromPath(path: String): android.net.Uri? {
         val projection = arrayOf(MediaStore.Images.Media._ID)
         val selection = "${MediaStore.Images.Media.DATA} = ?"

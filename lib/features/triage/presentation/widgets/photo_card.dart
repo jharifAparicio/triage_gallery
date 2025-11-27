@@ -10,6 +10,9 @@ class PhotoCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+
+    const int optimizeWidth = 800;
+
     return Container(
       decoration: BoxDecoration(
         color: const Color(0xFF1E293B), // Slate 800
@@ -32,6 +35,17 @@ class PhotoCard extends StatelessWidget {
             Image.file(
               File(photo.uri), // Usamos URI local
               fit: BoxFit.cover,
+              cacheWidth: optimizeWidth,
+
+              frameBuilder: (context, child, frame, wasSynchronouslyLoaded) {
+                if (wasSynchronouslyLoaded) return child;
+                return AnimatedOpacity(
+                  opacity: frame == null ? 0 : 1,
+                  duration: const Duration(milliseconds: 300),
+                  curve: Curves.easeOut,
+                  child: child,
+                );
+              },
               errorBuilder: (context, error, stackTrace) {
                 return const Center(
                   child: Icon(Icons.broken_image, color: Colors.grey, size: 50),
