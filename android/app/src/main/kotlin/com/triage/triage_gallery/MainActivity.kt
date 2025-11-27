@@ -17,6 +17,8 @@ import com.triage.triage_gallery.domain.models.PhotoStatus
 import com.triage.triage_gallery.domain.usecases.GetTriagePhotosUseCase
 import com.triage.triage_gallery.domain.usecases.ProcessSwipeUseCase
 import com.triage.triage_gallery.domain.usecases.ScanGalleryUseCase
+import com.triage.triage_gallery.domain.usecases.GetGalleryPhotosUseCase
+
 
 private val embedding: Any? = null
 
@@ -42,6 +44,8 @@ class MainActivity: FlutterActivity() {
         val scanGalleryUseCase = ScanGalleryUseCase(repository)
         val getTriagePhotosUseCase = GetTriagePhotosUseCase(repository)
         val processSwipeUseCase = ProcessSwipeUseCase(repository)
+        val getGalleryPhotosUseCase = GetGalleryPhotosUseCase(repository)
+
 
         // 2. CONFIGURACIÓN DEL CANAL
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL).setMethodCallHandler { call, result ->
@@ -112,6 +116,26 @@ class MainActivity: FlutterActivity() {
                         }
                     } else {
                         result.error("INVALID_ARGS", "Id or Status missing", null)
+                    }
+                }
+
+                "getGalleryPhotos"
+                -> {
+                    val statusString = call.argument<String>("status")
+                    
+                    if (statusString != null) {
+                        mainScope.launch {
+                            try {
+                                val status = PhotoStatus.valueOf(statusString)
+                                val photos = getGalleryPhotosUseCase(status)
+                                val photosMap = photos.map { photoToMap(it) }
+                                result.success(photosMap)
+                            } catch (e: Exception) {
+                                result.error("GET_PHOTOS_ERROR", e.message, null)
+                            }
+                        }
+                    }else{
+                        result.error("INVALID_ARGS", "Status missing", null)
                     }
                 }
 

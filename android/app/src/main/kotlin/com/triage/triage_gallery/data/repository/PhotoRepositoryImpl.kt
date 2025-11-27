@@ -240,4 +240,21 @@ class PhotoRepositoryImpl(
             }
         }
     }
+
+    override suspend fun getPhotosByStatus(status: PhotoStatus): List<Photo> {
+        val entities = dao.getPhotosByStatus(status.name)
+        return entities.map { relation ->
+            Photo(
+                id = relation.photo.id,
+                uri = relation.photo.uri,
+                hash = relation.photo.hash,
+                status = PhotoStatus.valueOf(relation.photo.status),
+                userNotes = relation.photo.userNotes,
+                categoryIds = relation.categories.map { it.id },
+                aiConfidence = relation.photo.aiConfidence,
+                dateCreated = relation.photo.dateCreated,
+                sizeBytes = relation.photo.sizeBytes
+            )
+        }
+    }
 }

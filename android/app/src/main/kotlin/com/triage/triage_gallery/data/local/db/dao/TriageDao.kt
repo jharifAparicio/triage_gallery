@@ -30,6 +30,9 @@ interface TriageDao {
     @Query("SELECT * FROM categories ORDER BY name ASC")
     suspend fun getAllCategories(): List<CategoryEntity>
 
+    @Transaction
+    @Query("SELECT * FROM photos WHERE status = :status ORDER BY date_created DESC")
+    suspend fun getPhotosByStatus(status: String): List<PhotoWithCategories>
 
     // --- ESCRITURA (BASICA) ---
 

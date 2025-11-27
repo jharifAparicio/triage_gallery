@@ -25,4 +25,5 @@ interface PhotoRepository {
     // Eliminar foto (Swipe Left) -> Borra archivo y DB
     suspend fun deletePhoto(photo: Photo)
     suspend fun scanAndSavePhotos(photos: List<Photo>)
+    suspend fun getPhotosByStatus(status: PhotoStatus) : List<Photo>
 }

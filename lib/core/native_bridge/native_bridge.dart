@@ -57,4 +57,28 @@ class NativeBridge {
       return false;
     }
   }
+
+  /// 4. Obtener fotos filtradas por estado (LIKED, HOLD, NOPED)
+  /// Este es el método que llama tu GalleryBloc.
+  Future<List<Photo>> getGalleryPhotos(String status) async {
+    try {
+      // Llamamos al método nativo "getGalleryPhotos"
+      // Es vital pasar el 'status' en mayúsculas para coincidir con el Enum de Kotlin
+      final List<dynamic>? result = await _channel.invokeListMethod(
+          'getGalleryPhotos',
+          {
+            'status': status.toUpperCase()
+          }
+      );
+
+      if (result == null) return [];
+
+      return result
+          .map((item) => Photo.fromMap(item as Map<dynamic, dynamic>))
+          .toList();
+    } on PlatformException catch (e) {
+      print("⚠️ Error obteniendo galería ($status): ${e.message}");
+      return [];
+    }
+  }
 }

@@ -11,14 +11,10 @@ class ProcessSwipeUseCase(
      * Ejecuta la lógica de negocio basada en hacia dónde deslizó el usuario.
      */
     suspend operator fun invoke(photo: Photo, status: PhotoStatus) {
-        if (status == PhotoStatus.NOPED) {
-            // Lógica específica para ELIMINAR (Swipe Left)
-            // Borrar archivo físico y de la DB
-            repository.deletePhoto(photo)
-        } else {
-            // Lógica para GUARDAR o MANTENER (Swipe Right / Up)
-            // CORRECCIÓN: Usamos 'updatePhotoStatus' para coincidir con la Interfaz/DAO
-            repository.setPhotoStatus(photo.id, status)
-        }
+        // Ya no llamamos a deletePhoto() aquí.
+        // Solo actualizamos el estado a NOPED, LIKED o HOLD.
+        // El borrado físico se hará en bloque desde la Galería ("Vaciar Papelera").
+
+        repository.setPhotoStatus(photo.id, status)
     }
 }
