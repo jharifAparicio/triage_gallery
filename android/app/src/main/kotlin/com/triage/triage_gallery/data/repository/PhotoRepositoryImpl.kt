@@ -1,8 +1,12 @@
 package com.triage.triage_gallery.data.repository
 
 import android.content.ContentUris
+import android.content.ContentValues
 import android.content.Context
+import android.os.Build
+import android.os.Environment
 import android.provider.MediaStore
+import androidx.annotation.RequiresApi
 import com.triage.triage_gallery.data.local.db.dao.TriageDao
 import com.triage.triage_gallery.data.local.db.entities.PhotoEntity
 import com.triage.triage_gallery.data.local.db.entities.PhotoCategoryEntity
@@ -14,14 +18,11 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.util.UUID
-import androidx.core.net.toUri
 
 class PhotoRepositoryImpl(
-    private val context: Context, // 1. Necesitamos Contexto para MediaStore
+    private val context: Context,
     private val dao: TriageDao
 ) : PhotoRepository {
-
-    // --- LECTURA ---
 
     override suspend fun getPendingPhotos(): List<Photo> {
         val entities = dao.getPendingPhotos()
@@ -51,8 +52,6 @@ class PhotoRepositoryImpl(
         }
     }
 
-    // --- ESCRITURA (ACCIONES SWIPE) ---
-
     override suspend fun setPhotoStatus(photoId: String, status: PhotoStatus) {
         dao.updatePhotoStatus(photoId, status.name)
     }
@@ -60,83 +59,133 @@ class PhotoRepositoryImpl(
     override suspend fun deletePhoto(photo: Photo) {
         withContext(Dispatchers.IO) {
             try {
-                // CORRECCIÓN IMPORTANTE PARA ANDROID 10+
-                // En lugar de File.delete(), usamos ContentResolver.
-                // Esto funciona mejor con Scoped Storage.
-                val contentUri = photo.uri.toUri()
-
-                // Intentamos borrar usando el proveedor de contenido
-                val rowsDeleted = context.contentResolver.delete(contentUri, null, null)
-
-                // Fallback: Si la URI era una ruta de archivo absoluta (legacy), intentamos File()
-                if (rowsDeleted == 0 && photo.uri.startsWith("/")) {
-                    val file = File(photo.uri)
-                    if (file.exists()) file.delete()
+                // 1. VERIFICAR SI TENEMOS SUPERPERMISOS (Android 11+)
+                val isFileManager = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                    Environment.isExternalStorageManager()
+                } else {
+                    false
                 }
+
+                if (isFileManager) {
+                    // MODO DIOS: Borrado directo sin preguntas
+                    // Al tener MANAGE_EXTERNAL_STORAGE, File.delete() funciona incluso en Android 11+
+                    val file = File(photo.uri)
+                    if (file.exists()) {
+                        file.delete()
+                    }
+
+                    // Intentamos limpiar la referencia en MediaStore para que no quede el fantasma
+                    // (Aunque el archivo ya se borró físicamente)
+                    try {
+                        val uriToDelete = getMediaUriFromPath(photo.uri)
+                        if (uriToDelete != null) {
+                            context.contentResolver.delete(uriToDelete, null, null)
+                        }
+                    } catch (e: Exception) {
+                        // Ignoramos errores aquí, el archivo físico ya murió
+                    }
+
+                } else {
+                    // MODO NORMAL: Usamos MediaStore (Papelera o Diálogo de Permisos)
+                    val uriToDelete = if (photo.uri.startsWith("/")) {
+                        getMediaUriFromPath(photo.uri)
+                    } else {
+                        android.net.Uri.parse(photo.uri)
+                    }
+
+                    if (uriToDelete != null) {
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                            val updatedValues = ContentValues().apply {
+                                put(MediaStore.MediaColumns.IS_TRASHED, 1)
+                            }
+                            context.contentResolver.update(uriToDelete, updatedValues, null, null)
+                        } else {
+                            context.contentResolver.delete(uriToDelete, null, null)
+                        }
+                    }
+                }
+
+                // Finalmente, borrar de nuestra DB local
+                dao.deletePhotoById(photo.id)
+
+            } catch (e: SecurityException) {
+                // Si aún así falla (ej. no diste el permiso de Manager), relanzamos para pedir permiso normal
+                throw e
             } catch (e: Exception) {
                 e.printStackTrace()
-                // Nota: En Android 10+, si la foto no es nuestra, esto lanzará una
-                // RecoverableSecurityException que debemos capturar en la UI para pedir permiso.
-                // Por ahora lo dejamos simple.
             }
-
-            dao.deletePhotoById(photo.id)
         }
     }
 
-    // --- ESCRITURA (IA & SCANNER) ---
+    // --- FUNCIÓN AUXILIAR CRÍTICA ---
+    // Busca en la base de datos de Android el ID correspondiente a una ruta de archivo
+    @RequiresApi(Build.VERSION_CODES.JELLY_BEAN)
+    private fun getMediaUriFromPath(path: String): android.net.Uri? {
+        val projection = arrayOf(MediaStore.Images.Media._ID)
+        val selection = "${MediaStore.Images.Media.DATA} = ?"
+        val selectionArgs = arrayOf(path)
 
-    // Implementación 1: Escaneo con MediaStore (Más rápido y oficial)
+        context.contentResolver.query(
+            MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+            projection,
+            selection,
+            selectionArgs,
+            null
+        )?.use { cursor ->
+            if (cursor.moveToFirst()) {
+                val idIndex = cursor.getColumnIndexOrThrow(MediaStore.Images.Media._ID)
+                val id = cursor.getLong(idIndex)
+                return ContentUris.withAppendedId(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, id)
+            }
+        }
+        return null
+    }
+
+    // ... (El resto del archivo scanDevicePhotos y scanAndSavePhotos sigue igual) ...
     override suspend fun scanDevicePhotos(): Int {
         return withContext(Dispatchers.IO) {
             var newPhotosCount = 0
 
             val projection = arrayOf(
                 MediaStore.Images.Media._ID,
-                MediaStore.Images.Media.DATA, // Ruta absoluta (útil para TFLite)
+                MediaStore.Images.Media.DATA,
                 MediaStore.Images.Media.DATE_TAKEN,
                 MediaStore.Images.Media.SIZE
             )
 
-            // Ordenar por fecha descendente para ver las nuevas primero
+            // Filtrar imágenes que NO están en la papelera
+            // (IS_TRASHED es columna solo en API 30+, en versiones viejas se ignora)
+            val selection = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                "${MediaStore.MediaColumns.IS_TRASHED} = 0"
+            } else {
+                null
+            }
+
             val sortOrder = "${MediaStore.Images.Media.DATE_TAKEN} DESC"
 
             val query = context.contentResolver.query(
                 MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
                 projection,
-                null,
+                selection,
                 null,
                 sortOrder
             )
 
             query?.use { cursor ->
-                val idColumn = cursor.getColumnIndexOrThrow(MediaStore.Images.Media._ID)
                 val dataColumn = cursor.getColumnIndexOrThrow(MediaStore.Images.Media.DATA)
                 val dateColumn = cursor.getColumnIndexOrThrow(MediaStore.Images.Media.DATE_TAKEN)
                 val sizeColumn = cursor.getColumnIndexOrThrow(MediaStore.Images.Media.SIZE)
 
                 while (cursor.moveToNext()) {
-                    val id = cursor.getLong(idColumn)
                     val path = cursor.getString(dataColumn)
                     val date = cursor.getLong(dateColumn)
                     val size = cursor.getLong(sizeColumn)
 
-                    // Construimos una URI content:// segura y moderna
-                    val contentUri = ContentUris.withAppendedId(
-                        MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
-                        id
-                    ).toString()
-
-                    // Usamos el ID de MediaStore como parte de nuestro hash/ID para consistencia
-                    // (Aunque generamos un UUID interno para nuestra DB)
-
                     try {
-                        // Insertar en DB (Ignorará duplicados por hash)
-                        // Nota: Usamos el 'path' para el hash porque es único por archivo físico
                         dao.insertPhoto(
                             PhotoEntity(
                                 id = UUID.randomUUID().toString(),
-                                uri = contentUri, // Guardamos la URI content://, no el path
+                                uri = path,
                                 hash = path.hashCode().toString(),
                                 status = PhotoStatus.PENDING.name,
                                 userNotes = null,
@@ -147,7 +196,6 @@ class PhotoRepositoryImpl(
                         )
                         newPhotosCount++
                     } catch (e: Exception) {
-                        // Duplicado o error
                     }
                 }
             }
@@ -155,7 +203,6 @@ class PhotoRepositoryImpl(
         }
     }
 
-    // Implementación 2: Guardado Procesado (IA)
     override suspend fun scanAndSavePhotos(photos: List<Photo>) {
         photos.forEach { photo ->
             dao.insertPhoto(
@@ -170,7 +217,6 @@ class PhotoRepositoryImpl(
                     sizeBytes = photo.sizeBytes
                 )
             )
-
             photo.categoryIds.forEach { catId ->
                 dao.insertPhotoCategory(
                     PhotoCategoryEntity(

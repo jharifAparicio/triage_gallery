@@ -17,7 +17,7 @@ class ProcessSwipeUseCase(
             repository.deletePhoto(photo)
         } else {
             // Lógica para GUARDAR o MANTENER (Swipe Right / Up)
-            // Solo actualizamos el estado en la base de datos
+            // CORRECCIÓN: Usamos 'updatePhotoStatus' para coincidir con la Interfaz/DAO
             repository.setPhotoStatus(photo.id, status)
         }
     }
