@@ -1,5 +1,5 @@
 import 'package:flutter/material.dart';
-import 'home_page.dart';
+import 'package:triage_gallery/home_page.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();

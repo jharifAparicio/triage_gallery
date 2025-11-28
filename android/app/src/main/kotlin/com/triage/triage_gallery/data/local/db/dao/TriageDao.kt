@@ -14,7 +14,8 @@ import com.triage.triage_gallery.data.local.db.entities.PhotoWithCategories
 interface TriageDao {
 
     // --- LECTURA ---
-
+    @Query("SELECT hash FROM photos")
+    suspend fun getAllHashes(): List<String>
     /**
      * Obtiene fotos pendientes para el Triage.
      * Usamos @Transaction porque Room tiene que hacer 2 consultas internas

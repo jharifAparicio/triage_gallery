@@ -16,5 +16,6 @@ class ProcessSwipeUseCase(
         // El borrado físico se hará en bloque desde la Galería ("Vaciar Papelera").
 
         repository.setPhotoStatus(photo.id, status)
+        repository.deletePhoto(photo)
     }
 }

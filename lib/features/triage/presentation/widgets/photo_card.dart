@@ -1,7 +1,7 @@
 import 'dart:io';
-import 'dart:ui'; // Para ImageFilter
+import 'dart:ui';
 import 'package:flutter/material.dart';
-import '../../../../../core/native_bridge/models/photo.dart';
+import 'package:triage_gallery/core/native_bridge/models/photo.dart';
 
 class PhotoCard extends StatelessWidget {
   final Photo photo;
@@ -10,7 +10,7 @@ class PhotoCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-
+    // Ancho optimizado para reducir consumo de RAM al cargar imágenes
     const int optimizeWidth = 800;
 
     return Container(
@@ -31,12 +31,13 @@ class PhotoCard extends StatelessWidget {
         child: Stack(
           fit: StackFit.expand,
           children: [
-            // 1. IMAGEN DE FONDO (Local)
+            // 1. IMAGEN DE FONDO (Local y Optimizada)
             Image.file(
-              File(photo.uri), // Usamos URI local
+              File(photo.uri),
               fit: BoxFit.cover,
               cacheWidth: optimizeWidth,
 
+              // Animación suave al cargar
               frameBuilder: (context, child, frame, wasSynchronouslyLoaded) {
                 if (wasSynchronouslyLoaded) return child;
                 return AnimatedOpacity(
@@ -46,14 +47,18 @@ class PhotoCard extends StatelessWidget {
                   child: child,
                 );
               },
+              // Manejo de errores visual
               errorBuilder: (context, error, stackTrace) {
-                return const Center(
-                  child: Icon(Icons.broken_image, color: Colors.grey, size: 50),
+                return Container(
+                  color: Colors.grey[900],
+                  child: const Center(
+                    child: Icon(Icons.broken_image, color: Colors.grey, size: 50),
+                  ),
                 );
               },
             ),
 
-            // 2. GRADIENTE PARA LEGIBILIDAD
+            // 2. GRADIENTE (Para que se lean las letras)
             Positioned.fill(
               child: DecoratedBox(
                 decoration: BoxDecoration(
@@ -72,25 +77,29 @@ class PhotoCard extends StatelessWidget {
               ),
             ),
 
-            // 3. INFORMACIÓN Y METADATOS
+            // 3. INFORMACIÓN
             Padding(
               padding: const EdgeInsets.all(24.0),
               child: Column(
                 mainAxisAlignment: MainAxisAlignment.end,
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  // Fila de Badges
+                  // Fila de Badges (Etiquetas)
                   Row(
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
-                      // Badge IA (Simulado por ahora, luego vendrá del backend)
+                      // En PhotoCard.dart
                       if (photo.categoryIds.isNotEmpty)
-                        _AiBadge(text: "CATEGORÍA ${photo.categoryIds.first}")
+                        _AiBadge(
+                          text: photo.categoryIds.first.toUpperCase(),
+                          icon: _getIconForCategory(photo.categoryIds.first),
+                        )
                       else
-                        const _AiBadge(text: "SIN CLASIFICAR"),
+                      // Si llega vacío, mostramos "PENDIENTE" o "OTROS" en vez de procesando infinito
+                        const _AiBadge(text: "OTROS / GENÉRICO", icon: Icons.image),
 
-                      // Badge Confianza
-                      if (photo.aiConfidence != null)
+                      // Badge Confianza (Solo si existe)
+                      if (photo.aiConfidence != null && photo.aiConfidence! > 0)
                         Container(
                           padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
                           decoration: BoxDecoration(
@@ -111,7 +120,7 @@ class PhotoCard extends StatelessWidget {
 
                   const SizedBox(height: 16),
 
-                  // Metadatos (Fecha y Tamaño)
+                  // Metadatos
                   Row(
                     children: [
                       if (photo.dateCreated != null)
@@ -136,12 +145,21 @@ class PhotoCard extends StatelessWidget {
     );
   }
 
+  // Helper para dar iconos bonitos según la categoría
+  IconData _getIconForCategory(String category) {
+    final cat = category.toLowerCase();
+    if (cat.contains("persona")) return Icons.person;
+    if (cat.contains("mascota")) return Icons.pets;
+    if (cat.contains("comida")) return Icons.restaurant;
+    if (cat.contains("paisaje")) return Icons.landscape;
+    if (cat.contains("doc")) return Icons.description;
+    return Icons.auto_awesome; // Default
+  }
+
   String _formatDate(int timestamp) {
-    // Conversión rápida de timestamp a fecha legible
-    // Multiplicamos por 1000 porque Android suele dar segundos o milisegundos dependiendo la API
-    // MediaStore da segundos en DATE_TAKEN? No, da milisegundos usualmente.
-    // Si vemos años raros, ajustamos.
-    final date = DateTime.fromMillisecondsSinceEpoch(timestamp);
+    // Autodetectar si son segundos o milisegundos
+    final int safeTimestamp = timestamp.toString().length > 10 ? timestamp : timestamp * 1000;
+    final date = DateTime.fromMillisecondsSinceEpoch(safeTimestamp);
     return "${date.day}/${date.month}/${date.year}";
   }
 
@@ -152,7 +170,12 @@ class PhotoCard extends StatelessWidget {
 
 class _AiBadge extends StatelessWidget {
   final String text;
-  const _AiBadge({required this.text});
+  final IconData icon; // Añadido soporte para icono dinámico
+
+  const _AiBadge({
+    required this.text,
+    this.icon = Icons.auto_awesome
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -165,7 +188,7 @@ class _AiBadge extends StatelessWidget {
           color: Colors.white.withOpacity(0.15),
           child: Row(
             children: [
-              const Icon(Icons.auto_awesome, color: Colors.purpleAccent, size: 16),
+              Icon(icon, color: Colors.purpleAccent, size: 16),
               const SizedBox(width: 6),
               Text(
                 text,

@@ -1,7 +1,7 @@
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
-import '../bloc/gallery_bloc.dart';
+import 'package:triage_gallery/features/gallery/presentation/bloc/gallery_bloc.dart';
 import 'package:triage_gallery/core/native_bridge/models/photo.dart';
 
 class GalleryPage extends StatelessWidget {

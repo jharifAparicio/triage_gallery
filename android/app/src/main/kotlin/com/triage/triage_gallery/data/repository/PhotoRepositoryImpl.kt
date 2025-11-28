@@ -1,14 +1,17 @@
 package com.triage.triage_gallery.data.repository
 
+import android.app.RecoverableSecurityException
 import android.content.ContentUris
 import android.content.ContentValues
 import android.content.Context
 import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
-import androidx.annotation.RequiresApi
 import androidx.core.net.toUri
+import com.triage.triage_gallery.data.ai.CategoryMapper
+import com.triage.triage_gallery.data.ai.ImageClassifier
 import com.triage.triage_gallery.data.local.db.dao.TriageDao
+import com.triage.triage_gallery.data.local.db.entities.CategoryEntity
 import com.triage.triage_gallery.data.local.db.entities.PhotoEntity
 import com.triage.triage_gallery.data.local.db.entities.PhotoCategoryEntity
 import com.triage.triage_gallery.domain.models.Category
@@ -24,22 +27,53 @@ class PhotoRepositoryImpl(
     private val context: Context,
     private val dao: TriageDao
 ) : PhotoRepository {
+    // 1. INSTANCIA PEREZOSA DEL CLASIFICADOR
+    // Solo cargará el modelo en memoria cuando escaneemos por primera vez
+    private val classifier by lazy {
+        ImageClassifier(context)
+    }
 
+    private val SCAN_BATCH_SIZE = 50
+
+    // --- LECTURA ---
     override suspend fun getPendingPhotos(): List<Photo> {
         val entities = dao.getPendingPhotos()
-        return entities.map { relation ->
-            Photo(
-                id = relation.photo.id,
-                uri = relation.photo.uri,
-                hash = relation.photo.hash,
-                status = PhotoStatus.valueOf(relation.photo.status),
-                userNotes = relation.photo.userNotes,
-                categoryIds = relation.categories.map { it.id },
-                aiConfidence = relation.photo.aiConfidence,
-                dateCreated = relation.photo.dateCreated,
-                sizeBytes = relation.photo.sizeBytes
-            )
+        return entities.map { mapEntityToDomain(it) }
+    }
+
+    // --- MAPEO INTELIGENTE ---
+    // Aquí es donde arreglamos el problema de visualización.
+    private fun mapEntityToDomain(relation: com.triage.triage_gallery.data.local.db.entities.PhotoWithCategories): Photo {
+        // Obtenemos los nombres de las categorías (ej. "Mascotas", "Otros")
+        val categoryNames = relation.categories.map { it.name }.toMutableList()
+
+        // Si la lista está vacía O solo dice "Otros", intentamos mejorar la info
+        // usando la etiqueta cruda que guardamos en 'userNotes' (ej. "Egyptian Cat")
+        val rawLabel = relation.photo.userNotes
+
+        if ((categoryNames.isEmpty() || categoryNames.contains("Otros")) && !rawLabel.isNullOrEmpty()) {
+            if (rawLabel != "Desconocido") {
+                // Quitamos el genérico "Otros" y ponemos lo específico
+                categoryNames.remove("Otros")
+                // Capitalizamos la etiqueta (ej. "egyptian cat" -> "Egyptian cat")
+                categoryNames.add(rawLabel.replaceFirstChar { it.uppercase() })
+            } else if (categoryNames.isEmpty()) {
+                // Si todo falló, ponemos un placeholder para que no salga vacío
+                categoryNames.add("Sin Clasificar")
+            }
         }
+
+        return Photo(
+            id = relation.photo.id,
+            uri = relation.photo.uri,
+            hash = relation.photo.hash,
+            status = PhotoStatus.valueOf(relation.photo.status),
+            userNotes = relation.photo.userNotes,
+            categoryIds = categoryNames,
+            aiConfidence = relation.photo.aiConfidence,
+            dateCreated = relation.photo.dateCreated,
+            sizeBytes = relation.photo.sizeBytes
+        )
     }
 
     override suspend fun getCategories(): List<Category> {
@@ -53,6 +87,7 @@ class PhotoRepositoryImpl(
         }
     }
 
+    // --- ESCRITURA ---
     override suspend fun setPhotoStatus(photoId: String, status: PhotoStatus) {
         dao.updatePhotoStatus(photoId, status.name)
     }
@@ -120,7 +155,7 @@ class PhotoRepositoryImpl(
                 }
 
                 // Borrar de nuestra base de datos local
-                dao.deletePhotoById(photo.id)
+                //dao.deletePhotoById(photo.id)
 
             } catch (e: SecurityException) {
                 // Si es RecoverableSecurityException, la UI lo atrapará y mostrará el diálogo
@@ -154,34 +189,30 @@ class PhotoRepositoryImpl(
         return null
     }
 
-    // ... (El resto del archivo scanDevicePhotos y scanAndSavePhotos sigue igual) ...
+    // --- ESCANEO OPTIMIZADO (SMART BATCHING) ---
     override suspend fun scanDevicePhotos(): Int {
         return withContext(Dispatchers.IO) {
             var newPhotosCount = 0
 
+            // 1. Cargar caché de hashes existentes (¡Velocidad pura!)
+            // Esto evita llamar a la DB o a la IA para fotos que ya conocemos.
+            val existingHashes = dao.getAllHashes().toHashSet()
+
+            // 1. AQUI SE ASEGURAN LAS 7 CATEGORÍAS EN LA DB
+            insertDefaultCategories()
+
             val projection = arrayOf(
-                MediaStore.Images.Media._ID,
                 MediaStore.Images.Media.DATA,
                 MediaStore.Images.Media.DATE_TAKEN,
                 MediaStore.Images.Media.SIZE
             )
+            val selection = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) "${MediaStore.MediaColumns.IS_TRASHED} = 0" else null
 
-            // Filtrar imágenes que NO están en la papelera
-            // (IS_TRASHED es columna solo en API 30+, en versiones viejas se ignora)
-            val selection = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                "${MediaStore.MediaColumns.IS_TRASHED} = 0"
-            } else {
-                null
-            }
-
+            // Traemos las más recientes primero
             val sortOrder = "${MediaStore.Images.Media.DATE_TAKEN} DESC"
 
             val query = context.contentResolver.query(
-                MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
-                projection,
-                selection,
-                null,
-                sortOrder
+                MediaStore.Images.Media.EXTERNAL_CONTENT_URI, projection, selection, null, sortOrder
             )
 
             query?.use { cursor ->
@@ -190,31 +221,70 @@ class PhotoRepositoryImpl(
                 val sizeColumn = cursor.getColumnIndexOrThrow(MediaStore.Images.Media.SIZE)
 
                 while (cursor.moveToNext()) {
+                    // Si ya procesamos suficientes fotos nuevas por esta vez, paramos.
+                    // Esto devuelve el control a la UI rápido.
+                    if (newPhotosCount >= SCAN_BATCH_SIZE) break
+
                     val path = cursor.getString(dataColumn)
+
+                    // --- OPTIMIZACIÓN CRÍTICA ---
+                    // Generamos el hash rápido (usando el path es suficiente y rápido)
+                    val simpleHash = path.hashCode().toString()
+
+                    // Si ya existe en nuestra DB, SALTAMOS inmediatamente.
+                    // No ejecutamos IA, no intentamos insertar. 0ms costo.
+                    if (existingHashes.contains(simpleHash)) {
+                        continue
+                    }
+
+                    // Si llegamos aquí, es una foto realmente nueva
                     val date = cursor.getLong(dateColumn)
                     val size = cursor.getLong(sizeColumn)
 
                     try {
+                        if (!File(path).exists()) continue
+
+                        // Procesamiento IA (Solo para las nuevas)
+                        var aiLabel = "Desconocido"
+                        var aiConf = 0.0f
+                        var catId = CategoryMapper.CAT_OTHER
+
+                        val result = classifier.classify(path)
+                        if (result != null) {
+                            aiLabel = result.first
+                            aiConf = result.second
+                            catId = CategoryMapper.mapLabelToCategoryId(aiLabel)
+                        }
+
+                        val photoId = UUID.randomUUID().toString()
+
                         dao.insertPhoto(
                             PhotoEntity(
-                                id = UUID.randomUUID().toString(),
+                                id = photoId,
                                 uri = path,
-                                hash = path.hashCode().toString(),
+                                hash = simpleHash,
                                 status = PhotoStatus.PENDING.name,
-                                userNotes = null,
-                                aiConfidence = null,
+                                userNotes = aiLabel,
+                                aiConfidence = aiConf,
                                 dateCreated = date,
                                 sizeBytes = size
                             )
                         )
+
+                        dao.insertPhotoCategory(
+                            PhotoCategoryEntity(photoId = photoId, categoryId = catId)
+                        )
+
                         newPhotosCount++
                     } catch (e: Exception) {
+                        e.printStackTrace()
                     }
                 }
             }
             newPhotosCount
         }
     }
+
 
     override suspend fun scanAndSavePhotos(photos: List<Photo>) {
         photos.forEach { photo ->
@@ -256,5 +326,21 @@ class PhotoRepositoryImpl(
                 sizeBytes = relation.photo.sizeBytes
             )
         }
+    }
+
+    // --- FUNCIÓN CLAVE: INSERTAR LAS 7 CATEGORÍAS ---
+    private suspend fun insertDefaultCategories() {
+        val cats = listOf(
+            CategoryEntity(CategoryMapper.CAT_PEOPLE, "Personas", "Gente y retratos", "person"),
+            CategoryEntity(CategoryMapper.CAT_PETS, "Mascotas", "Animales domésticos", "pets"),
+            CategoryEntity(CategoryMapper.CAT_FOOD, "Comida", "Alimentos y bebidas", "restaurant"),
+            CategoryEntity(CategoryMapper.CAT_NATURE, "Paisajes", "Naturaleza y exterior", "landscape"),
+            CategoryEntity(CategoryMapper.CAT_DOCUMENTS, "Docs", "Texto y papel", "description"),
+            CategoryEntity(CategoryMapper.CAT_VEHICLES, "Vehículos", "Transporte", "directions_car"),
+            CategoryEntity(CategoryMapper.CAT_OTHER, "Otros", "Sin clasificar", "image")
+        )
+        // Usamos insertCategory que tiene OnConflictStrategy.REPLACE
+        // Así, si actualizamos nombres o iconos, se actualizarán al iniciar la app.
+        cats.forEach { dao.insertCategory(it) }
     }
 }
