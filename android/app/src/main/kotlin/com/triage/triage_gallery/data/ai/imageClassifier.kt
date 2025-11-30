@@ -3,16 +3,16 @@ package com.triage.triage_gallery.data.ai
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.util.Log
+import androidx.collection.emptyFloatList
+import org.tensorflow.lite.DataType
 import org.tensorflow.lite.Interpreter
 import org.tensorflow.lite.support.common.FileUtil
-import org.tensorflow.lite.support.common.ops.NormalizeOp
 import org.tensorflow.lite.support.image.ImageProcessor
 import org.tensorflow.lite.support.image.TensorImage
 import org.tensorflow.lite.support.image.ops.ResizeOp
 import org.tensorflow.lite.support.tensorbuffer.TensorBuffer
-import java.io.File
-import java.nio.ByteBuffer
-import java.nio.ByteOrder
+import java.util.PriorityQueue
 
 /**
  * Clase ayudante para manejar TensorFlow Lite.
@@ -20,17 +20,15 @@ import java.nio.ByteOrder
  */
 class ImageClassifier(
     private val context: Context,
-    // Usamos MobileNet V2 (modelo estándar, rápido y ligero para móviles)
-    private val modelName: String = "mobilenet_v2_1.0_224_quant.tflite",
+    private val modelName: String = "mi_modelo.tflite",
     private val labelName: String = "labels.txt"
 ) {
-
     private var interpreter: Interpreter? = null
     private var labels: List<String> = emptyList()
-
-    // Configuración de imagen requerida por MobileNet
-    private val imageSizeX = 224
-    private val imageSizeY = 224
+    // Leemos esto dinámicamente del modelo
+    private var inputImageWidth: Int = 0
+    private var inputImageHeight: Int = 0
+    private var modelInputType: DataType = DataType.FLOAT32
 
     init {
         setupInterpreter()
@@ -38,92 +36,110 @@ class ImageClassifier(
 
     private fun setupInterpreter() {
         try {
-            // 1. Cargar el modelo desde assets
             val modelFile = FileUtil.loadMappedFile(context, modelName)
-
-            // 2. Opciones (Usar 4 hilos para ser rápido)
             val options = Interpreter.Options()
             options.setNumThreads(4)
 
-            // 3. Crear el intérprete
             interpreter = Interpreter(modelFile, options)
-
-            // 4. Cargar las etiquetas (nombres de las categorías)
             labels = FileUtil.loadLabels(context, labelName)
 
+            // --- AUTO-CONFIGURACIÓN ---
+            // Le preguntamos al modelo qué tamaño y tipo de datos espera
+            val inputTensor = interpreter?.getInputTensor(0)
+            val inputShape = inputTensor?.shape() // [1, 224, 224, 3]
+
+            if (inputShape != null) {
+                inputImageHeight = inputShape[1]
+                inputImageWidth = inputShape[2]
+                modelInputType = inputTensor.dataType()
+
+                Log.d("TRIAGE_AI", "🧠 Modelo cargado: Espera ${inputImageWidth}x${inputImageHeight} en formato $modelInputType")
+            }
         } catch (e: Exception) {
             e.printStackTrace()
         }
     }
 
-    /**
-     * Clasifica una imagen desde una ruta de archivo.
-     * Retorna un par: (Categoría Principal, Confianza 0.0-1.0)
-     */
-    fun classify(imagePath: String): Pair<String, Float>? {
+    data class Recognition(
+        val label: String,
+        val confidence: Float
+    )
+
+    fun classify(imagePath: String): List<Recognition> {
         if (interpreter == null) setupInterpreter()
+        val results = ArrayList<Recognition>()
 
         try {
-            // 1. Cargar Bitmap del disco (Reducido para ahorrar RAM)
-            val bitmap = loadBitmap(imagePath) ?: return null
+            val bitmap = loadBitmap(imagePath)
+            if (bitmap == null) {
+                Log.e("TRIAGE_AI", "❌ No se pudo cargar bitmap: $imagePath")
+                return emptyList()
+            }
 
-            // 2. Procesar imagen (Redimensionar a 224x224 que es lo que entiende la IA)
+            // 1. Procesador de Imagen
             val imageProcessor = ImageProcessor.Builder()
-                .add(ResizeOp(imageSizeX, imageSizeY, ResizeOp.ResizeMethod.BILINEAR))
-                // Si el modelo es flotante, se necesita normalización.
-                // Para modelos cuantizados (quant), generalmente no, o es diferente.
-                // MobileNet Quantizado usa 0-255 integers.
+                .add(ResizeOp(inputImageHeight, inputImageWidth, ResizeOp.ResizeMethod.BILINEAR))
+                // IMPORTANTE: Si el modelo es Float, a veces necesita normalización (0-255 a 0-1)
+                // Pero los modelos de Transfer Learning de Keras suelen llevar la normalización DENTRO.
+                // Probamos sin NormalizeOp primero.
                 .build()
 
-            var tensorImage = TensorImage(org.tensorflow.lite.DataType.UINT8) // UINT8 para modelos cuantizados
+            // 2. Crear TensorImage con el tipo CORRECTO (Detectado automáticamente)
+            var tensorImage = TensorImage(modelInputType)
             tensorImage.load(bitmap)
             tensorImage = imageProcessor.process(tensorImage)
 
-            // 3. Preparar el contenedor de salida
-            // MobileNet tiene 1001 categorías. El output es un array de probabilidades.
-            val outputBuffer = TensorBuffer.createFixedSize(intArrayOf(1, 1001), org.tensorflow.lite.DataType.UINT8)
+            // 3. Output Buffer (Flexible)
+            val outputTensor = interpreter?.getOutputTensor(0)
+            val outputShape = outputTensor?.shape() // [1, 7]
+            val outputType = outputTensor?.dataType() ?: DataType.FLOAT32
 
-            // 4. EJECUTAR INFERENCIA (El momento mágico)
+            val outputBuffer = TensorBuffer.createFixedSize(outputShape, outputType)
+
+            // 4. Ejecutar
             interpreter?.run(tensorImage.buffer, outputBuffer.buffer.rewind())
 
-            // 5. Interpretar resultados
-            val probabilities = outputBuffer.floatArray // Convertimos a float para leer fácil
+            // 5. Leer resultados
+            // Si el output es INT8/UINT8, hay que des-cuantizar, pero si es FLOAT sale directo.
+            val probabilities = outputBuffer.floatArray
 
-            // Buscamos la categoría con mayor probabilidad
-            var maxScore = 0f
-            var maxIndex = -1
+            val pq = PriorityQueue<Recognition>(3) { o1, o2 ->
+                o2.confidence.compareTo(o1.confidence)
+            }
 
             for (i in probabilities.indices) {
-                // En modelos cuantizados, el valor es 0-255. Lo normalizamos a 0-1 aproximado si queremos porcentaje.
-                // O simplemente comparamos el valor crudo.
-                if (probabilities[i] > maxScore) {
-                    maxScore = probabilities[i]
-                    maxIndex = i
+                // Si el modelo saca 0-255 (Quant), dividimos. Si saca 0-1 (Float), usamos directo.
+                var confidence = probabilities[i]
+                if (outputType == DataType.UINT8) {
+                    confidence /= 255.0f
+                }
+
+                // Umbral bajo para debug
+                if (confidence > 0.10) {
+                    if (i < labels.size) {
+                        pq.add(Recognition(labels[i], confidence))
+                    }
                 }
             }
 
-            if (maxIndex != -1 && maxIndex < labels.size) {
-                // Retornamos (Etiqueta, Confianza Normalizada 0-1)
-                return Pair(labels[maxIndex], maxScore / 255.0f)
+            for (i in 0 until minOf(3, pq.size)) {
+                results.add(pq.poll())
             }
 
         } catch (e: Exception) {
+            Log.e("TRIAGE_AI", "❌ Error clasificando: ${e.message}")
             e.printStackTrace()
         }
 
-        return null
+        return results
     }
 
     private fun loadBitmap(path: String): Bitmap? {
         return try {
             val options = BitmapFactory.Options()
-
-            // 1. Primero leemos solo las dimensiones (sin cargar la imagen)
             options.inJustDecodeBounds = true
             BitmapFactory.decodeFile(path, options)
 
-            // 2. Calculamos cuánto reducirla (Factor de escala)
-            // Queremos algo cercano a 224px, no 4000px
             val targetSize = 224
             var scale = 1
             while (options.outWidth / scale / 2 >= targetSize &&
@@ -131,9 +147,8 @@ class ImageClassifier(
                 scale *= 2
             }
 
-            // 3. Cargamos la imagen reducida
             options.inJustDecodeBounds = false
-            options.inSampleSize = scale // Esto ahorra muchísima RAM y CPU
+            options.inSampleSize = scale
             options.inPreferredConfig = Bitmap.Config.ARGB_8888
 
             BitmapFactory.decodeFile(path, options)

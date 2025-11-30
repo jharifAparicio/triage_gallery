@@ -7,15 +7,11 @@ import com.triage.triage_gallery.domain.repository.PhotoRepository
 class ProcessSwipeUseCase(
     private val repository: PhotoRepository
 ) {
-    /**
-     * Ejecuta la lógica de negocio basada en hacia dónde deslizó el usuario.
-     */
     suspend operator fun invoke(photo: Photo, status: PhotoStatus) {
-        // Ya no llamamos a deletePhoto() aquí.
-        // Solo actualizamos el estado a NOPED, LIKED o HOLD.
-        // El borrado físico se hará en bloque desde la Galería ("Vaciar Papelera").
-
+        if(status == PhotoStatus.NOPED) {
+            repository.deletePhoto(photo)
+            return
+        }
         repository.setPhotoStatus(photo.id, status)
-        repository.deletePhoto(photo)
     }
 }

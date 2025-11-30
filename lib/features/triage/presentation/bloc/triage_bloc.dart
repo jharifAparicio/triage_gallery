@@ -40,6 +40,11 @@ class TriageBloc extends Bloc<TriageEvent, TriageState> {
   }
 
   Future<void> _onSwiped(TriageSwiped event, Emitter<TriageState> emit) async {
+    if (state is! TriageLoaded) return; // Solo actuar si hay fotos cargadas
+
+    final currentPhotos = (state as TriageLoaded).photos;
+    final photoToSwipe = event.photo;
+
     // Mapeamos la dirección del gesto al estado de la DB
     String status;
     switch (event.direction) {
@@ -54,25 +59,30 @@ class TriageBloc extends Bloc<TriageEvent, TriageState> {
         break;
     }
 
-    // Ejecutamos la acción en el puente (Fire & Forget)
-    // No esperamos el resultado para que la UI sea fluida, asumimos éxito.
-    _bridge.swipePhoto(
-        id: event.photo.id,
-        uri: event.photo.uri,
-        status: status
+    // Ejecutamos la acción y ESPERAMOS el resultado
+    final bool success = await _bridge.swipePhoto(
+      id: photoToSwipe.id,
+      uri: photoToSwipe.uri,
+      status: status,
     );
 
-    // Nota: No emitimos un nuevo estado aquí porque la UI del Swipe
-    // (flutter_card_swiper) elimina la carta visualmente por nosotros.
-    // Solo necesitamos manejar si la lista se queda vacía.
+    // Si la operación en la capa nativa fue exitosa...
+    if (success) {
+      // Eliminamos la foto de la lista actual en el estado.
+      final updatedPhotos = List<Photo>.from(currentPhotos)..remove(photoToSwipe);
 
-    if (state is TriageLoaded) {
-      final currentPhotos = (state as TriageLoaded).photos;
-      // Si era la última foto...
-      if (currentPhotos.length <= 1) {
-        // Intentar cargar más o mostrar vacío
-        add(TriageStarted());
+      if (updatedPhotos.isEmpty) {
+        emit(TriageEmpty());
+      } else {
+        emit(TriageLoaded(photos: updatedPhotos));
       }
+    } else {
+      // Si falló, emitimos un error y mantenemos el estado actual.
+      // O podríamos recargar para asegurar consistencia.
+      emit(TriageError("Error al procesar el swipe. Inténtalo de nuevo."));
+      // Para ser más robusto, podríamos re-emitir el estado anterior
+      // para forzar a la UI a no eliminar la tarjeta.
+      emit(TriageLoaded(photos: currentPhotos));
     }
   }
 }

@@ -5,8 +5,6 @@ class NativeBridge {
   // El nombre debe ser IDÉNTICO al definido en MainActivity.kt
   static const _channel = MethodChannel('com.triage.gallery/bridge');
 
-  /// 1. Escanear el dispositivo buscando fotos nuevas
-  /// Retorna la cantidad de fotos encontradas e insertadas en la DB.
   Future<int> scanDevice() async {
     try {
       final int count = await _channel.invokeMethod('scanDevice');
@@ -21,12 +19,18 @@ class NativeBridge {
   /// Retorna una lista de objetos Photo listos para usar en la UI.
   Future<List<Photo>> getPendingPhotos() async {
     try {
-      // Pedimos la lista a Android. invokeListMethod es más seguro para listas.
       final List<dynamic>? result = await _channel.invokeListMethod('getPendingPhotos');
 
       if (result == null) return [];
 
-      // Convertimos cada Mapa que viene de Android en un objeto Photo de Dart
+      // 🔍 LOG DE LLEGADA (Añade esto)
+      if (result.isNotEmpty) {
+        final firstMap = result.first as Map<dynamic, dynamic>;
+        print("🛬 Flutter Recibió: ID=${firstMap['id']} CATS=${firstMap['categoryIds']}");
+      } else {
+        print("⚠️ Flutter Recibió lista vacía");
+      }
+
       return result
           .map((item) => Photo.fromMap(item as Map<dynamic, dynamic>))
           .toList();

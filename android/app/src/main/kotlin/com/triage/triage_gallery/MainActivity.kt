@@ -74,6 +74,13 @@ class MainActivity: FlutterActivity() {
                             val photos = getTriagePhotosUseCase()
                             // Convertimos los objetos Kotlin a Mapas (JSON-like) para Flutter
                             val photosMap = photos.map { photoToMap(it) }
+                            // 🔍 LOG DE SALIDA (Añade esto)
+                            if (photosMap.isNotEmpty()) {
+                                val first = photosMap.first()
+                                android.util.Log.d("BRIDGE_DEBUG", "🚀 Enviando a Flutter: ID=${first["id"]} CATS=${first["categoryIds"]}")
+                            } else {
+                                android.util.Log.d("BRIDGE_DEBUG", "⚠️ Enviando lista vacía a Flutter")
+                            }
                             result.success(photosMap)
                         } catch (e: Exception) {
                             result.error("GET_PHOTOS_ERROR", e.message, null)
@@ -90,20 +97,6 @@ class MainActivity: FlutterActivity() {
                         mainScope.launch {
                             try {
                                 val status = PhotoStatus.valueOf(statusString)
-
-                                // Reconstruimos un objeto Photo mínimo necesario o pasamos ID
-                                // Nota: El caso de uso original pedía (Photo, Status).
-                                // Podemos sobrecargarlo o buscar la foto, pero para eficiencia
-                                // en el repo implementamos uno que acepta ID en 'setPhotoStatus'.
-                                // Aquí asumimos que ProcessSwipeUseCase maneja la lógica.
-
-                                // Truco: Para borrar (Left), necesitamos la URI para borrar el archivo.
-                                // Si la UI manda la URI, mejor. Si no, tendríamos que buscarla en DB.
-                                // Por simplicidad del ejemplo, asumiremos que el UseCase busca la foto si es necesario
-                                // O simplificamos pasando un objeto Photo dummy con la URI si viene de Flutter.
-
-                                // Opción Rápida: Modificar ProcessSwipeUseCase para buscar por ID
-                                // o pasar la URI desde Flutter. Vamos a pasar la URI desde Flutter en los argumentos.
                                 val uri = call.argument<String>("uri") ?: ""
                                 val dummyPhoto = Photo(id = id, uri = uri, hash = "")
 
@@ -151,6 +144,8 @@ class MainActivity: FlutterActivity() {
             "uri" to photo.uri,
             "hash" to photo.hash,
             "status" to photo.status.name,
+            "userNotes" to photo.userNotes,
+            "categoryIds" to photo.categoryIds,
             "aiConfidence" to photo.aiConfidence,
             "dateCreated" to photo.dateCreated,
             "sizeBytes" to photo.sizeBytes

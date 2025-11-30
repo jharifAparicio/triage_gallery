@@ -86,17 +86,31 @@ class PhotoCard extends StatelessWidget {
                 children: [
                   // Fila de Badges (Etiquetas)
                   Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    crossAxisAlignment: CrossAxisAlignment.end,
                     children: [
-                      // En PhotoCard.dart
-                      if (photo.categoryIds.isNotEmpty)
-                        _AiBadge(
-                          text: photo.categoryIds.first.toUpperCase(),
-                          icon: _getIconForCategory(photo.categoryIds.first),
-                        )
-                      else
-                      // Si llega vacío, mostramos "PENDIENTE" o "OTROS" en vez de procesando infinito
-                        const _AiBadge(text: "OTROS / GENÉRICO", icon: Icons.image),
+                      // Usamos Expanded y Wrap para que las etiquetas fluyan
+                      // y no se desborden si son muchas.
+                      Expanded(
+                        child: Wrap(
+                          spacing: 8.0, // Espacio horizontal entre badges
+                          runSpacing: 8.0, // Espacio vertical si hay varias líneas
+                          children: photo.categoryIds.isNotEmpty
+                              ? photo.categoryIds.map((categoryId) {
+                            return _AiBadge(
+                              text: categoryId.toUpperCase(),
+                              icon: _getIconForCategory(categoryId),
+                            );
+                          }).toList()
+                              : [
+                            const _AiBadge(
+                              text: "OTROS / GENÉRICO",
+                              icon: Icons.image,
+                            )
+                          ],
+                        ),
+                      ),
+
+                      const SizedBox(width: 8),
 
                       // Badge Confianza (Solo si existe)
                       if (photo.aiConfidence != null && photo.aiConfidence! > 0)
